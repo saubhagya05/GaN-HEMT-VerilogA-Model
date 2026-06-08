@@ -1,0 +1,32 @@
+* DC Sweep - 2x200 um Reference Device
+
+* 1. Load the OSDI library first
+.control
+pre_osdi gan_hemt.osdi
+.endc
+
+* 2. THE FIX: Define the model AND pass the sizes here!
+.model my_gan gan_hemt Ng=2 Wg=200e-6
+
+* 3. Circuit Voltage
+Vds d 0 dc 0
+Vgs g 0 dc 0
+
+* 4. Plug in the 3-node transistor (Clean)
+N1 d g 0 my_gan
+
+* 5. Simulation Instructions
+.control
+* Run the sweep
+dc Vds 0 40 0.5 Vgs -4 0 0.25
+
+* 1. Bypass the GUI and save an image file directly
+set hcopydevtype=svg
+hardcopy graph_2x200.svg -i(Vds) title '2x200um GaN HEMT: Ids vs Vds'
+
+* 2. Save the raw text data just in case we need it for Python
+wrdata dc_2x200_results.txt -i(Vds)
+
+* Exit safely
+quit
+.endc

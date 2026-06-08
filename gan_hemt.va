@@ -1,0 +1,313 @@
+// ===========================================================================
+// gan_hemt.va — Scalable Nonlinear GaN HEMT Compact Model (Modified Angelov)
+// ===========================================================================
+//
+// Paper:  Zhao Li et al., "A Nonlinear Scalable Model for Gallium Nitride
+//         (GaN) HEMTs Including Self-Heating Effect"
+//         2022 IEEE Int. Conf. on Microwave and Millimeter Wave Technology
+//         DOI: 10.1109/ICMMT55580.2022.10022916
+//
+// Reference device: 2x200 um GaN HEMT (0.25 um gate length)
+//
+// Compatibility: OpenVAF 23.5+ / NGSpice 38+ (OSDI)
+//   All commercial attribute tags (* desc="..." *) have been removed.
+//   Range constraints (from [X:Y)) are preserved (standard Verilog-AMS).
+//
+// Usage in NGSpice:
+//   .control
+//   pre_osdi gan_hemt.osdi
+//   .endc
+//   .model my_gan gan_hemt Ng=2 Wg=200e-6
+//   N1 drain gate source my_gan
+//
+// Robustness hardening (v2 — Phase 2 ready):
+//   1. cosh() overflow guard: clamps argument to <=50 to prevent Inf/NaN
+//   2. Thermal node Gmin: 1e-12 S shunt prevents floating node during OP
+//   3. $bound_step: limits transient timestep for accuracy up to 20 GHz
+//
+// ===========================================================================
+
+`include "disciplines.vams"
+`include "constants.vams"
+
+module gan_hemt(drain, gate, source);
+
+    inout drain, gate, source;
+    electrical drain, gate, source;
+
+    // Internal intrinsic nodes
+    electrical di, gi, si;
+
+    // Internal thermal node: V(dt) = channel temperature rise (delta_T)
+    electrical dt;
+
+    // ===================================================================
+    //  DEVICE GEOMETRY (user sets these to scale the device)
+    // ===================================================================
+    parameter real Ng     = 2       from [1:inf);  // Number of gate fingers
+    parameter real Wg     = 200e-6  from (0:inf);  // Unit gate finger width [m]
+    parameter real Ng_ref = 2       from [1:inf);  // Reference finger count
+    parameter real Wg_ref = 200e-6  from (0:inf);  // Reference finger width [m]
+
+    // ===================================================================
+    //  IDS CORE PARAMETERS (Table I — reference 2x200 um device)
+    // ===================================================================
+    parameter real Ipk    =  0.231;                // Peak drain current [A]
+    parameter real Vpk    =  0.081;                // Gate voltage at peak gm [V]
+    parameter real Dvpk   =  1.577   from [0:inf); // Vpk shift range [V]
+    parameter real P1     =  0.457;                // Psi linear coefficient
+    parameter real P2     = -0.025;                // Psi quadratic coefficient
+    parameter real P3     =  0.040;                // Psi cubic coefficient
+    parameter real alphaR =  1.9e-3  from [0:inf); // Saturation param offset
+    parameter real alphaS =  0.118   from [0:inf); // Saturation param slope
+    parameter real lambda =  1.1e-3;               // Channel length modulation
+    parameter real B1     =  0.799;                // P1m fitting param B1
+    parameter real B2     =  0.241;                // P1m fitting param B2
+
+    // ===================================================================
+    //  THERMAL PARAMETERS
+    // ===================================================================
+    parameter real TIpk   = -1.5e-3;              // Ipk thermal coeff [1/K]
+    parameter real TP1    = -3.1e-3;              // P1 thermal coeff [1/K]
+    parameter real Rth    =  21.075  from (0:inf); // Thermal resistance [K/W]
+    parameter real Cth_val=  2.35e-14 from (0:inf); // Thermal capacitance [J/K]
+
+    // ===================================================================
+    //  NONLINEAR CAPACITANCE PARAMETERS (Cgs — Eq. 10)
+    // ===================================================================
+    parameter real Cgsp   =  3.6e-13 from [0:inf); // Cgs parasitic offset [F]
+    parameter real Cgso   =  1.2e-12 from [0:inf); // Cgs bias-dep coeff [F]
+    parameter real P10    =  1.148;                // Cgs Vgs tanh offset
+    parameter real P11    =  0.797;                // Cgs Vgs tanh slope
+    parameter real P20    = -1.138;                // Cgs Vds tanh offset
+    parameter real P21    =  7.8e-2;               // Cgs Vds tanh slope
+
+    // ===================================================================
+    //  NONLINEAR CAPACITANCE PARAMETERS (Cgd — Eq. 11)
+    // ===================================================================
+    parameter real Cgdp   =  3.9e-14 from [0:inf); // Cgd parasitic offset [F]
+    parameter real Cgdo   =  4.2e-13 from [0:inf); // Cgd bias-dep coeff [F]
+    parameter real P30    =  2.1e-5;               // Cgd Vgs tanh offset
+    parameter real P31    =  0.184;                // Cgd Vgs tanh slope
+    parameter real P40    =  2.1e-4;               // Cgd Vds tanh offset
+    parameter real P41    = -0.098;                // Cgd Vds tanh slope
+
+    // ===================================================================
+    //  EXTRINSIC PARASITIC ELEMENTS
+    // ===================================================================
+    parameter real Rg_ext =  3.238   from (0:inf); // Gate resistance [Ohm]
+    parameter real Rd_ext = 10.301   from (0:inf); // Drain resistance [Ohm]
+    parameter real Rs_ext =  0.965   from (0:inf); // Source resistance [Ohm]
+    parameter real Lg_ext =  5.96e-11 from [0:inf); // Gate inductance [H]
+    parameter real Ld_ext =  1.29e-10 from [0:inf); // Drain inductance [H]
+    parameter real Ls_ext =  1.99e-11 from [0:inf); // Source inductance [H]
+    parameter real Cpgd   =  7.94e-16 from [0:inf); // Gate-drain pad cap [F]
+    parameter real Cpg    =  1.21e-13 from [0:inf); // Gate-source pad cap [F]
+    parameter real Cpd    =  7.39e-13 from [0:inf); // Drain-source pad cap [F]
+
+    // ===================================================================
+    //  SCALING EXPONENTS (Table II)
+    // ===================================================================
+    parameter real sc_k  = 0.964;  // Width exponent for extrinsic/intrinsic
+    parameter real sc_p  = 0.775;  // Finger exponent for extrinsic/intrinsic
+    parameter real sc_In = 0.903;  // Ipk finger scaling exponent
+    parameter real sc_Iw = 0.939;  // Ipk width scaling exponent
+    parameter real sc_Rn = 0.289;  // Rth finger scaling exponent
+    parameter real sc_Rw = 0.656;  // Rth width scaling exponent
+
+    // ===================================================================
+    //  MODEL SWITCHES
+    // ===================================================================
+    parameter integer selfheat = 1 from [0:1]; // Self-heating: 0=off, 1=on
+
+    // ===================================================================
+    //  LOCAL VARIABLES
+    // ===================================================================
+
+    // Scaling
+    real SFn, SFw;
+    real scale_ext;     // common extrinsic scaling factor
+    real Ipk_s, Rth_s;  // scaled core params
+
+    // Scaled extrinsics
+    real Rg_s, Rd_s, Rs_s;
+    real Lg_s, Ld_s, Ls_s;
+    real Cpgd_s, Cpg_s, Cpd_s;
+    real Cgsp_s, Cgso_s, Cgdp_s, Cgdo_s;
+    real Cth_s;
+
+    // Intermediate Ids variables
+    real Vgsi, Vdsi;
+    real delta_T;
+    real IpkT_val, P1T_val, P1m_val;
+    real Vpkm_val, psi_val, alpha_val;
+    real Ids_val, Pdiss_val;
+    real cosh_term, dV;
+    real Pdiss_eff;
+    real B2Vds_clamp;   // cosh overflow guard variable
+
+    // Capacitances
+    real Cgs_val, Cgd_val;
+
+    analog begin
+
+        // ===========================================================
+        // STEP 1: COMPUTE SCALING FACTORS  (Eqs. 12-13)
+        // ===========================================================
+        SFn = Ng / Ng_ref;
+        SFw = Wg / Wg_ref;
+        scale_ext = pow(SFw, sc_k) * pow(SFn, sc_p);
+
+        // Ids peak current scaling (Eq. 14)
+        Ipk_s = Ipk * pow(SFn, sc_In) * pow(SFw, sc_Iw);
+
+        // Thermal resistance scaling (Eq. 15)
+        Rth_s = Rth * pow(SFn, sc_Rn) * pow(SFw, sc_Rw);
+
+        // Extrinsic element scaling (Table II)
+        Rg_s   = Rg_ext  * scale_ext;
+        Rd_s   = Rd_ext  * scale_ext;
+        Rs_s   = Rs_ext  * scale_ext;
+        Lg_s   = Lg_ext  * scale_ext;
+        Ld_s   = Ld_ext  * scale_ext;
+        Ls_s   = Ls_ext  * scale_ext;
+        Cpgd_s = Cpgd    * scale_ext;
+        Cpg_s  = Cpg     * scale_ext;
+        Cpd_s  = Cpd     * scale_ext;
+        Cgsp_s = Cgsp    * scale_ext;
+        Cgso_s = Cgso    * scale_ext;
+        Cgdp_s = Cgdp    * scale_ext;
+        Cgdo_s = Cgdo    * scale_ext;
+        Cth_s  = Cth_val * scale_ext;
+
+        // Bound transient timestep for accuracy up to 20 GHz
+        // (ignored during .dc and .ac — only affects .tran)
+        $bound_step(2.5e-12);
+
+        // ===========================================================
+        // STEP 2: EXTRINSIC PARASITIC NETWORK
+        //   gate --[Lg+Rg]--> gi
+        //   drain--[Ld+Rd]--> di
+        //   source-[Ls+Rs]--> si
+        //   + pad capacitors between external terminals
+        // ===========================================================
+
+        // Gate: series R + L
+        V(gate, gi)    <+  Rg_s * I(gate, gi);
+        V(gate, gi)    <+  Lg_s * ddt(I(gate, gi));
+
+        // Drain: series R + L
+        V(drain, di)   <+  Rd_s * I(drain, di);
+        V(drain, di)   <+  Ld_s * ddt(I(drain, di));
+
+        // Source: series R + L
+        V(source, si)  <+  Rs_s * I(source, si);
+        V(source, si)  <+  Ls_s * ddt(I(source, si));
+
+        // Pad capacitors (open at DC — only matter for AC)
+        I(gate, drain)   <+  ddt(Cpgd_s * V(gate, drain));
+        I(gate, source)  <+  ddt(Cpg_s  * V(gate, source));
+        I(drain, source) <+  ddt(Cpd_s  * V(drain, source));
+
+        // ===========================================================
+        // STEP 3: READ INTRINSIC VOLTAGES & THERMAL STATE
+        // ===========================================================
+        Vgsi    = V(gi, si);
+        Vdsi    = V(di, si);
+        delta_T = V(dt);     // thermal node voltage = temperature rise
+
+        // ===========================================================
+        // STEP 4: CORE IDS EQUATION  (Eqs. 1-7)
+        //
+        // The self-heating feedback loop:
+        //   Ids → Pdiss → ΔTch → IpkT, P1T → Ids (repeat)
+        // is resolved implicitly by the simulator's Newton solver.
+        // We just write the equations; the solver converges.
+        // ===========================================================
+
+        // Eq. 6: Thermally-corrected peak current
+        IpkT_val = Ipk_s * (1.0 + TIpk * delta_T);
+
+        // Eq. 7: Thermally-corrected P1
+        P1T_val = P1 * (1.0 + TP1 * delta_T);
+
+        // Eq. 3: Bias-dependent peak gate voltage
+        Vpkm_val = Vpk - Dvpk + Dvpk * tanh(alphaS * Vdsi);
+
+        // Eq. 4: Bias-dependent P1m
+        // Overflow guard: cosh(x) → Inf for x > ~710 (double precision).
+        // Clamp to 50 — invisible at converged solutions (cosh(50)≈2.6e21)
+        // but prevents NaN during Newton iteration transients.
+        B2Vds_clamp = B2 * Vdsi;
+        if (B2Vds_clamp > 50.0) B2Vds_clamp = 50.0;
+        if (B2Vds_clamp < -50.0) B2Vds_clamp = -50.0;
+        cosh_term = cosh(B2Vds_clamp);
+        P1m_val   = P1T_val * (1.0 + B1 / (cosh_term * cosh_term));
+
+        // Eq. 2: Gate control polynomial (psi)
+        dV = Vgsi - Vpkm_val;
+        psi_val = P1m_val * dV + P2 * dV * dV + P3 * dV * dV * dV;
+
+        // Eq. 5: Bias-dependent saturation parameter
+        alpha_val = alphaR + alphaS * (1.0 + tanh(psi_val));
+
+        // Eq. 1: MAIN DRAIN CURRENT
+        Ids_val = IpkT_val
+                  * (1.0 + tanh(psi_val))
+                  * tanh(alpha_val * Vdsi)
+                  * (1.0 + lambda * Vdsi);
+
+        // Contribute drain current: flows from di to si
+        I(di, si) <+ Ids_val;
+
+        // ===========================================================
+        // STEP 5: THERMAL SUB-CIRCUIT  (Eqs. 8-9)
+        //
+        // Equivalent circuit at node dt:
+        //   Pdiss(current source) --> Rth(to ground) || Cth(to ground)
+        //   V(dt) = ΔTch
+        //
+        // At DC steady-state: V(dt) = Pdiss × Rth
+        // ===========================================================
+        Pdiss_val = Ids_val * Vdsi;
+
+        if (selfheat == 1) begin
+            Pdiss_eff = Pdiss_val;
+        end else begin
+            Pdiss_eff = 0.0;
+        end
+
+        // Thermal node KCL:  -Pdiss + V(dt)/Rth + Cth*dV(dt)/dt = 0
+        I(dt) <+ -Pdiss_eff;
+        I(dt) <+  V(dt) / Rth_s;
+        I(dt) <+  ddt(Cth_s * V(dt));
+
+        // Gmin shunt: prevents thermal node from floating during
+        // initial DC operating point solve. 1e-12 S conductance
+        // introduces negligible error (~0.001 K at 1 W dissipation).
+        I(dt) <+  1.0e-12 * V(dt);
+
+        // ===========================================================
+        // STEP 6: NONLINEAR CAPACITANCES  (Eqs. 10-11)
+        //
+        // These are open-circuit at DC — zero effect on DC sweeps.
+        // They become active during .ac and .tran analysis.
+        // ===========================================================
+
+        // Eq. 10: Gate-source capacitance
+        Cgs_val = Cgsp_s
+                  + Cgso_s * (1.0 + tanh(P10 + P11 * Vgsi))
+                            * (1.0 + tanh(P20 + P21 * Vdsi));
+
+        // Eq. 11: Gate-drain capacitance
+        Cgd_val = Cgdp_s
+                  + Cgdo_s * (1.0 + tanh(P30 + P31 * Vgsi))
+                            * (1.0 - tanh(P40 + P41 * Vdsi));
+
+        // Capacitor current contributions
+        I(gi, si) <+  ddt(Cgs_val * V(gi, si));
+        I(gi, di) <+  ddt(Cgd_val * V(gi, di));
+
+    end // analog begin
+
+endmodule
