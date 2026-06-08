@@ -72,9 +72,9 @@ Below are the DC validation curves showing accurate thermal droop and knee volta
 
 | 2 × 200 µm Reference Device | 4 × 200 µm Scaled Device |
 | :---: | :---: |
-| <img src="[./images/dc_2x200.svg](https://drive.google.com/drive/folders/1kDr2V8FABEIFX1wxEYx4IfswZKrqc4ul?usp=sharing)" width="400" alt="2x200 DC Curve"> | <img src="[./images/dc_4x200.svg](https://drive.google.com/drive/folders/1kDr2V8FABEIFX1wxEYx4IfswZKrqc4ul?usp=sharing)" width="400" alt="4x200 DC Curve"> |
+| <img src="[./dc_2x200.svg]" width="400" alt="2x200 DC Curve"> | <img src="[./dc_4x200.svg]" width="400" alt="4x200 DC Curve"> |
 | **2 × 250 µm Scaled Device** | **4 × 250 µm Scaled Device** |
-| <img src="[./images/dc_2x250.svg](https://drive.google.com/drive/folders/1kDr2V8FABEIFX1wxEYx4IfswZKrqc4ul?usp=sharing)" width="400" alt="2x250 DC Curve"> | <img src="[./images/dc_4x250.svg](https://drive.google.com/drive/folders/1kDr2V8FABEIFX1wxEYx4IfswZKrqc4ul?usp=sharing)" width="400" alt="4x250 DC Curve"> |
+| <img src="[./dc_2x250.svg]" width="400" alt="2x250 DC Curve"> | <img src="[./dc_4x250.svg]" width="400" alt="4x250 DC Curve"> |
 
 ---
 
