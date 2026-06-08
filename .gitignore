@@ -1,0 +1,14 @@
+# NGSpice & OpenVAF ignores
+*.osdi
+*.txt
+*.svg
+
+# Keep the images directory though
+!images/
+!images/*.svg
+
+# Python / IDE
+__pycache__/
+*.pyc
+.idea/
+.vscode/
